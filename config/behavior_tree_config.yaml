@@ -4,6 +4,7 @@ bt_executer_node:
     bt_package: drims_homework
     plugins:
       - check_dice_face
+      - apply_transformation
     ros_plugins:
       - move_to_pose
       - move_to_joint
