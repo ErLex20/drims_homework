@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4" main_tree_to_execute="Benchmark">
+
+  <!-- include transitivo: mission.xml tira dentro skills.xml.
+       NON includere anche skills.xml qui, sarebbe una doppia
+       registrazione degli stessi ID. -->
+  <include path="mission.xml"/>
+
+  <!-- ====================================================================
+       Benchmark
+       Banco di regressione: N prove con dado in posizione e faccia casuali,
+       senza nessuno alla tastiera.
+       Il ForceSuccess e' obbligatorio: Repeat si interrompe al primo figlio
+       che fallisce, e una missione fallita su venti troncherebbe la
+       statistica proprio nel caso che volevate misurare.
+       ==================================================================== -->
+  <BehaviorTree ID="Benchmark">
+    <Repeat num_cycles="20">
+      <Sequence>
+        <TriggerService service_name="/reset_dice"
+                        success="{reset_ok}"
+                        message="{reset_message}"/>
+        <ForceSuccess>
+          <SubTree ID="MainTree" _autoremap="true"/>
+        </ForceSuccess>
+      </Sequence>
+    </Repeat>
+  </BehaviorTree>
+
+</root>

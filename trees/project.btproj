@@ -1,11 +1,37 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<root BTCPP_format="4" project_name="Project">
-    <!-- Description of Node Models (used by Groot) -->
+<root BTCPP_format="4" project_name="DRIMS2026">
+
+  <!-- Progetto Groot2: SOLO il modello delle foglie.
+       GENERATO dagli alberi, non scritto a mano. Il modello che veniva col
+       pacchetto era incompleto - mancavano CanTransform e TriggerService, e a
+       MoveToPose/MoveToJoint mancavano relative_motion, velocity_scaling e
+       result_code - quindi Groot2 apriva i nostri alberi segnalando porte
+       sconosciute su quasi ogni foglia. Se si aggiunge una foglia o una porta,
+       rigenerare invece di ritoccare.
+
+       Nessuna lista di <include> degli alberi, di proposito: mission.xml ed
+       example.xml definiscono ENTRAMBI un MainTree, e elencarli qui darebbe ID
+       duplicati. In Groot2 si apre direttamente il singolo albero: i suoi
+       <include> tirano dentro skills.xml da soli.
+
+       CheckDiceFace non compare in nessun albero attivo - vive in un blocco
+       commentato di example.xml - ma il plugin e' REGISTRATO in
+       mission_bt_config.yaml, quindi sta nel modello: senza, chi la aggiunge
+       in Groot2 la vedrebbe come nodo sconosciuto.
+
+       Le porte di uscita sono quelle che SCRIVONO sulla blackboard:
+       result_code, face_number, pose, success, message. -->
+
     <TreeNodesModel>
         <Action ID="AttachObject" editable="true">
             <input_port name="service_name"/>
             <input_port name="object_id"/>
             <input_port name="target_frame_id"/>
+        </Action>
+        <Action ID="CanTransform" editable="true">
+            <input_port name="source_frame"/>
+            <input_port name="target_frame"/>
+            <input_port name="timeout_ms"/>
         </Action>
         <Action ID="CheckDiceFace" editable="true">
             <input_port name="target_face"/>
@@ -28,14 +54,23 @@
         <Action ID="MoveToJoint" editable="true">
             <input_port name="action_name"/>
             <input_port name="joint_target"/>
+            <input_port name="velocity_scaling"/>
+            <output_port name="result_code"/>
         </Action>
         <Action ID="MoveToPose" editable="true">
             <input_port name="action_name"/>
             <input_port name="cartesian_motion"/>
-            <input_port name="pose_target"/>
             <input_port name="frame_id"/>
             <input_port name="position"/>
             <input_port name="orientation"/>
+            <input_port name="relative_motion"/>
+            <input_port name="velocity_scaling"/>
+            <output_port name="result_code"/>
+        </Action>
+        <Action ID="TriggerService" editable="true">
+            <input_port name="service_name"/>
+            <output_port name="success"/>
+            <output_port name="message"/>
         </Action>
     </TreeNodesModel>
 </root>

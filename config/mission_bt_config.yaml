@@ -1,0 +1,22 @@
+bt_executer_node:
+  ros__parameters:
+    # mission.xml per la gara, benchmark.xml per le prove ripetute
+    bt_xml_file: mission.xml
+    bt_package: drims_homework
+    # plugin sincroni BT.CPP
+    plugins:
+      - check_dice_face
+    # plugin ROS (azioni e servizi)
+    ros_plugins:
+      # can_transform usa CreateRosNodePlugin (esporta BT_RegisterRosNodeFromPlugin),
+      # quindi va QUI e non fra i plugins sincroni: il README dice il contrario
+      - can_transform
+      - move_to_pose
+      - move_to_joint
+      - gripper_command
+      - attach_object
+      - detach_object
+      - dice_identification
+      # usato da benchmark.xml per /reset_dice, e da /goal_reached quando
+      # subentrera' il planner
+      - trigger_service

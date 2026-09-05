@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+
+  <include path="skills.xml"/>
+
+  <!-- ====================================================================
+       MainTree
+       Il Fallback attorno a Mission e' il "finally": i BT non hanno un
+       costrutto di cleanup, e senza quel ramo un fallimento della missione
+       lascerebbe il robot fermo dove capita, magari col gripper chiuso.
+       Nessun GoHome finale: sul percorso cronometrato tornare a casa costa
+       tempo e non porta punti.
+
+       Lo Script contiene SOLO scalari. La faccia obiettivo non c'e' piu': la
+       possiede il planner, che la riceve dal topic /target_face. Un solo XML
+       vale per tutte e sei le facce, e cambiarla non richiede ne' sed ne'
+       colcon build.
+
+       Costanti del gripper: sono quelle degli organizzatori, prese dalla loro
+       implementazione di riferimento drims_homework/demo_node.py
+
+           gripper_command(position=0.045)   # Open gripper
+           gripper_command(position=0.0)     # 0.0 = closed
+           # 0.045 = open, adjust depending on gripper model
+
+       Il loro commento "adjust depending on gripper model" e' la cosa da
+       ricordare: il numero dipende dal modello di pinza, non e' universale.
+
+       max_effort resta al DEFAULT di MotionClient.gripper_command, cioe' 0.0,
+       che la sua docstring definisce "no explicit limit". example.xml usa
+       1.0, ma demo_node.py - l'implementazione di riferimento - lascia il
+       default, e quello e' il dato piu' vicino a un consiglio.
+       Sul robot vero 0.0 non significa comunque "senza limite": l'adapter
+       URCap lo SATURA al minimo dichiarato di 20 N (il controllo che
+       solleverebbe un'eccezione e' commentato nel loro codice), e 20 N su un
+       dado e' esattamente quello che si vuole.
+
+       position e' l'APERTURA, e lo stesso valore serve entrambi i bersagli.
+       Sul robot vero l'adapter URCap la interpreta in metri sul fondo scala
+       0..0.05 dell'Hand-E, quindi 0.045 e' quasi tutta aperta. In simulazione
+       comanda il giunto robotiq_hande_left_finger_joint, che la cella
+       istanzia con grip_pos_min=0 e grip_pos_max=0.025 (ur5e_cell.urdf.xacro):
+       0.045 e' oltre il fondo corsa e vale quindi "tutta aperta" per
+       saturazione.
+
+       Funziona su entrambi, ma per ragioni diverse, e questa e' la sola cosa
+       da tenere d'occhio: in simulazione l'apertura riesce perche' l'hardware
+       finto di ros2_control rispecchia il comando senza far rispettare i
+       limiti dell'URDF. Se un giorno quei limiti venissero applicati, il
+       giunto si fermerebbe a 0.025, il controller non vedrebbe raggiunta la
+       tolleranza di 0.01 e ABORTIREBBE - e l'apertura in Pick NON e' avvolta
+       in ForceSuccess, quindi Pick fallirebbe al primo passo. Se accade,
+       questa e' la causa, e il rimedio e' 0.025 in simulazione.
+
+       effort_low ed effort_grasp valgono lo stesso numero e restano due chiavi
+       distinte di proposito: aprire non richiede forza, stringere si', e sul
+       robot vero l'effort mappa sulla forza di presa. Se un giorno serve
+       differenziarli, il posto c'e' gia'.
+       ==================================================================== -->
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+
+      <Script code="world_frame:='table_top';
+                    object_id:='dice';
+                    grip_open:=0.045;
+                    grip_close:=0.0;
+                    effort_low:=0.0;
+                    effort_grasp:=0.0;
+                    vel_fast:=1.0;
+                    vel_slow:=0.3" />
+
+      <!-- GoHome con recupero, e non nudo. Se l'albero precedente e' stato
+           interrotto a meta' ciclo il dado resta ATTACCATO al tip nella scena
+           di pianificazione e MoveIt rifiuta qualunque goal: misurato il
+           2026-09-04, MoveToJoint abortito in 40 ms e l'intera missione morta
+           al primo tick, senza mai raggiungere un ramo di recupero.
+           Recover apre la pinza, stacca e ritratta, che e' esattamente il
+           rimedio a quello stato, e finisce a sua volta con GoHome. -->
+      <Fallback>
+        <SubTree ID="GoHome"  _autoremap="true"/>
+        <SubTree ID="Recover" _autoremap="true"/>
+      </Fallback>
+
+      <Fallback>
+        <SubTree ID="Mission" _autoremap="true"/>
+        <ForceSuccess>
+          <SubTree ID="Recover" _autoremap="true"/>
+        </ForceSuccess>
+      </Fallback>
+
+    </Sequence>
+  </BehaviorTree>
+
+  <!-- ====================================================================
+       Mission
+       Un solo contatore: identificazioni fallite, flip riusciti, flip
+       falliti e recuperi consumano lo stesso budget, perche' in tutti i casi
+       l'azione successiva corretta e' identica (ri-identifica e riprova).
+
+       Il budget e' 8. Il planner impara la mappa del dado dai propri flip,
+       quindi il caso peggiore quando tutto funziona e' TRE cicli: due di
+       esplorazione piu' uno per concludere. Misurato su 600 prove offline:
+       media 1.64, massimo 3, nessun fallimento. Il resto del budget e'
+       margine per rimbalzi al rilascio e identificazioni fallite.
+       Da stringere sui dati del benchmark.
+
+       Il ForceFailure e' l'unico modo, in un BT, di dire "ho fatto qualcosa
+       ma non ho ancora finito": dopo un flip riuscito l'albero DEVE fallire
+       per rientrare nel loop e ri-verificare.
+
+       Due rami di recupero distinti, come gli stati 9 e 10 delle slide:
+         - Reposition  rimedia al fallimento dell'IDENTIFICAZIONE
+         - Recover     rimedia al fallimento della MANIPOLAZIONE
+       ==================================================================== -->
+  <BehaviorTree ID="Mission">
+    <RetryUntilSuccessful num_attempts="100">
+      <Sequence>
+
+        <!-- Identify sta PRIMA del Fallback di uscita, quindi un suo
+             fallimento ucciderebbe l'iterazione senza mai raggiungere nessun
+             recupero: il robot ri-interrogherebbe il servizio sei volte dalla
+             stessa posa. Questo Fallback rende raggiungibile Reposition. -->
+        <Fallback>
+          <SubTree ID="Identify" _autoremap="true"/>
+          <ForceFailure>
+            <SubTree ID="Reposition" _autoremap="true"/>
+          </ForceFailure>
+        </Fallback>
+
+        <Fallback>
+
+          <TriggerService service_name="/goal_reached"
+                          success="{goal_reached}"
+                          message="{goal_message}"/>
+
+          <ForceFailure>
+            <Fallback>
+              <SubTree ID="FlipCycle" _autoremap="true"/>
+              <SubTree ID="Recover"   _autoremap="true"/>
+            </Fallback>
+          </ForceFailure>
+
+        </Fallback>
+
+      </Sequence>
+    </RetryUntilSuccessful>
+  </BehaviorTree>
+
+</root>

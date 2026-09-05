@@ -1,0 +1,354 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
+
+  <!--
+  ===========================================================================
+  DRIMS 2026 - Libreria di subtree
+  ===========================================================================
+  L'albero SEQUENZIA, il planner DECIDE. Qui non c'e' geometria del dado:
+  posizioni e orientamenti arrivano come TF prodotte da dice_planner, che
+  sceglie l'asse di presa e l'ampiezza del flip.
+
+  Lo STESSO albero vale per simulazione e robot vero. Le uniche cose che i
+  due non condividono sono la scena di collisione (attach/detach) e chi
+  pubblica dice_tf; entrambe sono gia' assorbite qui dentro.
+  Vedi la docstring di drims_homework/dice_planner.py per la derivazione e i
+  dati misurati.
+
+  TF attese dal planner (figlie di table_top):
+      pregrasp_tf      sopra la faccia superiore, orientamento di presa scelto
+      grasp_tf         TCP sul centro del dado, dita sull'asse scelto
+      flip_target_tf   posa assoluta dopo sollevamento + rotazione
+      place_tf         posa di rilascio
+
+  Le porte viaggiano via _autoremap="true": ogni SubTree riceve una blackboard
+  NUOVA, quindi senza autoremap le costanti non arrivano.
+
+    nome           tipo          prodotto da   consumato da
+    ................................................................
+    world_frame    string        Script        Pick, Place, Recover, FlipCycle
+    object_id      string        Script        Pick, Place, Recover
+    grip_open      double        Script        Pick, Place, Recover
+    grip_close     double        Script        Pick
+    effort_low     double        Script        Pick, Place, Recover
+    effort_grasp   double        Script        Pick
+    vel_fast       double        Script        moti liberi
+    vel_slow       double        Script        moti vicino al dado
+    face           int           Identify      diagnostica
+    dice_pose      PoseStamped   Identify      diagnostica
+    rc_*           int           ogni moto     diagnostica
+
+  I SOLI numeri rimasti sono distanze relative al ROBOT, non al dado:
+  sollevamento, ritratte e le configurazioni di GoHome/Reposition. Tutto
+  quello che dipende dal dado sta nello yaml del planner.
+
+  RETRY: nessuno a livello di albero. Il motion server ritenta gia' da solo
+  ("[Attempt 1/3] Moving to pose" nel suo log). Verificato il 2026-09-02.
+  ===========================================================================
+  -->
+
+  <!-- ====================================================================
+       GoHome
+       Configurazione di partenza: la STESSA in cui parte la simulazione,
+       cioe' initial_positions.yaml di drims_description.
+       Il pan a 1.57 non e' arbitrario: nella cella 1 il robot e' montato con
+       rpy "0 0 -1.57", quindi gli stessi valori di giunto danno una posa
+       ruotata di -90 gradi rispetto al tavolo, e quel +1.57 annulla la
+       rotazione della base. Con la vecchia home (pan 0.0) sul robot vero il
+       braccio risultava ruotato di -90 gradi.
+       NB: camera_link nell'URDF e' agganciato a base_link con un valore
+       nominale mai aggiornato, quindi nel modello ruota col robot; la camera
+       vera sta sul portale, ancorato a table_top, che non ruota. Non usare
+       camera_link come riferimento per l'allineamento.
+       ==================================================================== -->
+  <BehaviorTree ID="GoHome">
+    <MoveToJoint action_name="/move_to_joint"
+                 joint_target="1.57;-2.0;1.57;-1.57;-1.57;0.0"
+                 velocity_scaling="{vel_fast}"
+                 result_code="{rc_home}"/>
+  </BehaviorTree>
+
+  <!-- ====================================================================
+       Reposition
+       Stato 9 delle slide, rimedio al fallimento della IDENTIFICAZIONE: il
+       robot probabilmente occlude la telecamera. Posa FISSA ma DIVERSA da
+       home (base ruotata di 45 gradi), altrimenti sei tentativi dalla stessa
+       posa danno sei volte lo stesso risultato.
+       ==================================================================== -->
+  <BehaviorTree ID="Reposition">
+    <MoveToJoint action_name="/move_to_joint"
+                 joint_target="2.36;-2.0;1.57;-1.57;-1.57;0.0"
+                 velocity_scaling="{vel_fast}"
+                 result_code="{rc_reposition}"/>
+  </BehaviorTree>
+
+  <!-- ====================================================================
+       Identify
+       DEVE precedere qualsiasi uso di dice_tf: quella TF non viene
+       pubblicata finche' il servizio non e' stato chiamato almeno una volta
+       (verificato sul simulatore). La foglia ritorna FAILURE da sola quando
+       response.success e' false.
+       ==================================================================== -->
+  <BehaviorTree ID="Identify">
+    <Sequence>
+      <DiceIdentification service_name="/dice_identification"
+                          face_number="{face}"
+                          pose="{dice_pose}"/>
+      <CanTransform source_frame="{world_frame}"
+                    target_frame="dice_tf"
+                    timeout_ms="1000"/>
+    </Sequence>
+  </BehaviorTree>
+
+  <!-- ====================================================================
+       Pick
+       apri -> pregrasp_tf -> grasp_tf (cartesiano) -> chiudi -> attach ->
+       solleva.
+
+       Aprire il gripper PRIMA non e' cosmetico: con 45 mm di apertura
+       (position 0.045, il valore degli organizzatori) e un dado da 30 mm le
+       dita lo scavalcano con ~7.5 mm di gioco per lato e la posa di presa
+       risulta libera da collisioni. Col gripper chiuso MoveIt
+       rifiuterebbe il goal, perche' il dado e' un collision object.
+
+       ForceSuccess sulla chiusura: con allow_stalling:false il controller fa
+       setAborted() sullo stallo e la foglia ritorna FAILURE proprio quando la
+       presa e' riuscita. Logica invertita e non distinguibile dalla foglia,
+       quindi si rinuncia al segnale invece di fidarsi di uno sbagliato.
+
+       Il sollevamento e' relativo nel frame WORLD e non nel tip: +Z e' su
+       senza ambiguita' di segno, e non dipende dall'orientamento del tool.
+       ==================================================================== -->
+  <BehaviorTree ID="Pick">
+    <Sequence>
+
+
+      <!-- ForceSuccess sull'APERTURA, non solo sulla chiusura.
+           Misurato sul robot vero il 2026-09-04: robotiq_2f_adapter_node.py:381
+           costruisce il Result con effort=0 (intero) invece di 0.0, e
+           control_msgs lo rifiuta con
+             AssertionError: The 'effort' field must be of type 'float'
+           Quel ramo si prende quando la pinza e' GIA' nella posizione
+           richiesta, quindi ogni apertura ridondante fa abortire l'action.
+           Nel log della missione questo bruciava i tentativi: due
+           GripperCommand per iterazione, nessun MoveToPose, sette tentativi
+           in 0.84 secondi, perche' Pick moriva sul suo primo nodo.
+           Il bug e' in static e non lo tocchiamo; qui si smette solo di
+           credere a un segnale che mente in entrambi i versi - in simulazione
+           abortisce quando la presa RIESCE, sul robot quando non c'e' niente
+           da fare. -->
+      <ForceSuccess>
+        <GripperCommand action_name="/gripper_action_controller/gripper_cmd"
+                        position="{grip_open}"
+                        max_effort="{effort_low}"/>
+      </ForceSuccess>
+
+      <MoveToPose action_name="/move_to_pose"
+                  frame_id="pregrasp_tf"
+                  position="0.0;0.0;0.0"
+                  orientation="0.0;0.0;0.0;1.0"
+                  relative_motion="false"
+                  cartesian_motion="false"
+                  velocity_scaling="{vel_fast}"
+                  result_code="{rc_pregrasp}"/>
+
+      <MoveToPose action_name="/move_to_pose"
+                  frame_id="grasp_tf"
+                  position="0.0;0.0;0.0"
+                  orientation="0.0;0.0;0.0;1.0"
+                  relative_motion="false"
+                  cartesian_motion="true"
+                  velocity_scaling="{vel_slow}"
+                  result_code="{rc_grasp}"/>
+
+      <ForceSuccess>
+        <GripperCommand action_name="/gripper_action_controller/gripper_cmd"
+                        position="{grip_close}"
+                        max_effort="{effort_grasp}"/>
+      </ForceSuccess>
+
+      <!-- ForceSuccess perche' l'attach esiste solo dove il dado e' un
+           CollisionObject della scena. In simulazione lo spawner ce lo mette
+           e l'attach serve davvero (MoveIt pianifica il flip sapendo che il
+           dado si muove con il tool); sul robot vero la scena e' vuota e il
+           servizio fallisce. Senza questo wrapper lo STESSO albero riesce in
+           simulazione e muore alla prima presa in laboratorio. -->
+      <ForceSuccess>
+        <AttachObject service_name="/attach_object"
+                      object_id="{object_id}"
+                      target_frame_id="tip"/>
+      </ForceSuccess>
+
+      <MoveToPose action_name="/move_to_pose"
+                  frame_id="{world_frame}"
+                  position="0.0;0.0;0.10"
+                  orientation="0.0;0.0;0.0;1.0"
+                  relative_motion="true"
+                  cartesian_motion="true"
+                  velocity_scaling="{vel_slow}"
+                  result_code="{rc_lift}"/>
+
+    </Sequence>
+  </BehaviorTree>
+
+  <!-- ====================================================================
+       Flip
+       Un solo moto verso una posa ASSOLUTA. Il quaternione della rotazione,
+       il suo verso (+90, -90, 180) e la scelta dell'asse di presa sono tutti
+       dentro flip_target_tf: qui non c'e' nulla da scegliere.
+
+       CARTESIANO, e il motivo NON e' la linea retta: e' la CONTINUITA' del
+       ramo IK. computeCartesianPath interpola dallo stato corrente e semina
+       l'IK di ogni waypoint con il precedente, quindi non puo' produrre uno
+       srotolamento del polso; o segue la rotazione con continuita', o
+       fallisce pulito e passa a Recover.
+       Misurato il 2026-09-02 senza cartesiano: wrist_1 da -2.036 a +5.258,
+       418 gradi percorsi in 19 secondi, di cui 2*pi di puro unwrapping.
+       ==================================================================== -->
+  <BehaviorTree ID="Flip">
+    <MoveToPose action_name="/move_to_pose"
+                frame_id="flip_target_tf"
+                position="0.0;0.0;0.0"
+                orientation="0.0;0.0;0.0;1.0"
+                relative_motion="false"
+                cartesian_motion="true"
+                velocity_scaling="{vel_slow}"
+                result_code="{rc_flip}"/>
+  </BehaviorTree>
+
+  <!-- ====================================================================
+       Place
+       place_tf -> apri -> detach -> ritratta -> torna a casa.
+
+       La quota di rilascio sta dentro place_tf, calcolata dal planner da
+       place_clearance. Non e' una scelta libera: dopo il flip la pinza e'
+       orizzontale e il corpo dell'Hand-E limita la discesa, quindi il dado va
+       rilasciato con qualche centimetro di caduta. E' anche il punto dove si
+       perde il determinismo (il dado puo' rimbalzare su un'altra faccia); il
+       loop di Mission lo assorbe ri-identificando, ma costa un ciclo.
+
+       Il GoHome finale serve sul robot vero per liberare il campo visivo
+       prima della Identify successiva. Costa ~3 s: e' il primo candidato
+       all'ottimizzazione, una ritratta piu' corta che liberi la telecamera.
+       ==================================================================== -->
+  <BehaviorTree ID="Place">
+    <Sequence>
+
+      <MoveToPose action_name="/move_to_pose"
+                  frame_id="place_tf"
+                  position="0.0;0.0;0.0"
+                  orientation="0.0;0.0;0.0;1.0"
+                  relative_motion="false"
+                  cartesian_motion="true"
+                  velocity_scaling="{vel_slow}"
+                  result_code="{rc_place}"/>
+
+      <GripperCommand action_name="/gripper_action_controller/gripper_cmd"
+                      position="{grip_open}"
+                      max_effort="{effort_low}"/>
+
+      <!-- Simmetrico all'attach, e qui e' anche peggio ignorarlo: sta DOPO
+           l'apertura del gripper, quindi un suo fallimento farebbe morire
+           Place a dado gia' rilasciato, con l'utensile fermo sopra il dado. -->
+      <ForceSuccess>
+        <DetachObject service_name="/detach_object"
+                      object_id="{object_id}"/>
+      </ForceSuccess>
+
+      <MoveToPose action_name="/move_to_pose"
+                  frame_id="{world_frame}"
+                  position="0.0;0.0;0.15"
+                  orientation="0.0;0.0;0.0;1.0"
+                  relative_motion="true"
+                  cartesian_motion="true"
+                  velocity_scaling="{vel_fast}"
+                  result_code="{rc_retreat}"/>
+
+      <SubTree ID="GoHome" _autoremap="true"/>
+
+    </Sequence>
+  </BehaviorTree>
+
+  <!-- ====================================================================
+       FlipCycle
+       Un singolo ciclo: presa, rotazione, posa.
+
+       I due gate in testa sono il pezzo che mancava prima del planner:
+         - /plan_available fallisce se manca ancora la faccia, l'obiettivo o
+           dice_tf, ed e' anche cio' che fa AVANZARE il planner alla presa
+           successiva. Chiamarlo una volta per ciclo, qui, non e' un
+           dettaglio: e' il battito che rende deterministica la sequenza dei
+           tentativi. Se fallisce si va in Reposition SENZA aver afferrato il
+           dado, invece di scoprirlo dopo 25 secondi con il dado in mano.
+         - CanTransform verifica che le TF del piano siano effettivamente
+           pubblicate, cioe' che non si stia inseguendo un frame stantio.
+       ==================================================================== -->
+  <BehaviorTree ID="FlipCycle">
+    <Sequence>
+      <TriggerService service_name="/plan_available"
+                      success="{plan_ok}"
+                      message="{plan_msg}"/>
+      <CanTransform source_frame="{world_frame}"
+                    target_frame="grasp_tf"
+                    timeout_ms="1000"/>
+      <SubTree ID="Pick"  _autoremap="true"/>
+      <SubTree ID="Flip"  _autoremap="true"/>
+      <SubTree ID="Place" _autoremap="true"/>
+    </Sequence>
+  </BehaviorTree>
+
+  <!-- ====================================================================
+       Recover
+       Stato 10 delle slide, rimedio al fallimento della MANIPOLAZIONE.
+       Il ForceSuccess sul DetachObject e' obbligatorio: il servizio fallisce
+       quando non c'e' nulla attaccato, che e' esattamente uno dei casi in cui
+       il recupero serve.
+       La ritratta e' nel frame world e non nel tip, perche' qui non si sa in
+       che orientamento sia rimasto il tool: +Z nel mondo e' sempre su.
+       ==================================================================== -->
+  <BehaviorTree ID="Recover">
+    <Sequence>
+
+
+      <!-- ForceSuccess sull'APERTURA, non solo sulla chiusura.
+           Misurato sul robot vero il 2026-09-04: robotiq_2f_adapter_node.py:381
+           costruisce il Result con effort=0 (intero) invece di 0.0, e
+           control_msgs lo rifiuta con
+             AssertionError: The 'effort' field must be of type 'float'
+           Quel ramo si prende quando la pinza e' GIA' nella posizione
+           richiesta, quindi ogni apertura ridondante fa abortire l'action.
+           Nel log della missione questo bruciava i tentativi: due
+           GripperCommand per iterazione, nessun MoveToPose, sette tentativi
+           in 0.84 secondi, perche' Pick moriva sul suo primo nodo.
+           Il bug e' in static e non lo tocchiamo; qui si smette solo di
+           credere a un segnale che mente in entrambi i versi - in simulazione
+           abortisce quando la presa RIESCE, sul robot quando non c'e' niente
+           da fare. -->
+      <ForceSuccess>
+        <GripperCommand action_name="/gripper_action_controller/gripper_cmd"
+                        position="{grip_open}"
+                        max_effort="{effort_low}"/>
+      </ForceSuccess>
+
+      <ForceSuccess>
+        <DetachObject service_name="/detach_object"
+                      object_id="{object_id}"/>
+      </ForceSuccess>
+
+      <ForceSuccess>
+        <MoveToPose action_name="/move_to_pose"
+                    frame_id="{world_frame}"
+                    position="0.0;0.0;0.10"
+                    orientation="0.0;0.0;0.0;1.0"
+                    relative_motion="true"
+                    cartesian_motion="true"
+                    velocity_scaling="{vel_slow}"
+                    result_code="{rc_recover_retreat}"/>
+      </ForceSuccess>
+
+      <SubTree ID="GoHome" _autoremap="true"/>
+
+    </Sequence>
+  </BehaviorTree>
+
+</root>

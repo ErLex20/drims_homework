@@ -1,0 +1,55 @@
+# Spawner del dado, configurato per la CELLA 1 - DRIMS 2026
+#
+# Da passare al launch dello spawner:
+#
+#   ros2 launch drims_dice_simulator spawn_dice.launch.py \
+#     params_file:=$(ros2 pkg prefix drims_homework)/share/drims_homework/config/dice_spawner_cell1.yaml
+#
+# PERCHE' un file nostro e non gli argomenti del launch: il nodo legge prima i
+# parametri "piatti" (x_min, y_min, surface_height, ...) e poi li SOVRASCRIVE
+# con quelli del blocco cell_<selected_cell> (apply_selected_cell in
+# dice_spawner.py). Quindi passare x_min o surface_height al launch non serve a
+# niente, e selected_cell non e' fra i nomi che il launch propaga: l'unico modo
+# di sceglierlo e' un params_file. Quello del pacchetto sta in static e non lo
+# tocchiamo.
+#
+# Il nome del nodo e' dice_spawner_node, non /**: e' quello con cui il launch
+# lo avvia.
+
+dice_spawner_node:
+  ros__parameters:
+
+    # LA correzione: il file del pacchetto ha selected_cell: 4, che mentre si
+    # lavora sulla cella 1 fa usare al dado casuale i limiti sbagliati e un
+    # piano a -0.02 invece di -0.04, cioe' 2 cm sopra quello vero.
+    selected_cell: 1
+
+    # Limiti del tabellone della cella 1, w.r.t. base_link. Ripetuti qui per
+    # averli sotto gli occhi: sono quelli che selected_cell applica.
+    #   x -0.35 .. 0.15    y 0.50 .. 0.85    piano -0.04
+    cell_1:
+      x_min: -0.35
+      x_max: 0.15
+      y_min: 0.50
+      y_max: 0.85
+      surface_height: -0.04
+
+    # Posizione fissa, VICINA al robot.
+    #
+    # Il default del pacchetto e' [-0.1, 0.65, -0.04], che sta a 0.657 m
+    # dall'asse della base. Li' la ritratta cartesiana di pick_place.xml
+    # abortisce: con cartesian_fraction_threshold 0.99 e passo 0.01, i 15 punti
+    # del moto devono essere TUTTI risolvibili, e gli ultimi escono dallo
+    # spazio di lavoro.
+    #
+    # [0.0, 0.55] sta a 0.550 m: dentro il tabellone, ma con margine.
+    # La z viene comunque corretta dal nodo per appoggiare il dado sul piano
+    # (surface_height + dice_size/2 = -0.025).
+    random_position: false
+    position: [0.0, 0.55, -0.04]
+    yaw: 0.5
+
+    face_up: 5
+
+    # Misurato sui dadi della scuola, come nel planner.
+    dice_size: 0.03

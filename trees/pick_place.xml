@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4" main_tree_to_execute="PickPlace">
+
+  <!--
+  ===========================================================================
+  I MOTI di un pick and place, SENZA afferrare - messa in servizio hardware
+  ===========================================================================
+  Percorre tutta la geometria del ciclo ma NON chiude mai il gripper: nessun
+  contatto col dado, nessun attach. Serve a validare i moti e le pose con il
+  rischio piu' basso possibile, prima di toccare qualcosa.
+
+  Conseguenze volute dell'assenza di presa:
+    * niente GripperCommand di chiusura, quindi niente da fare con
+      allow_stalling:false e la sua logica invertita;
+    * niente AttachObject. Attaccare un oggetto che NON si sta tenendo e'
+      peggio che non attaccarlo: MoveIt crederebbe che il dado si muova con
+      la pinza e potrebbe rifiutare la discesa per collisioni inesistenti;
+    * il gripper resta APERTO per tutto il ciclo, quindi alla posa di presa
+      le dita scavalcano il dado con ~11 mm di gioco per lato senza toccarlo.
+
+  Deliberatamente spartano e autosufficiente:
+    * nessun include e nessun subtree, un solo Sequence che si legge
+      dall'alto in basso;
+    * NESSUN planner, pose letterali riferite a dice_tf. Non dipende quindi
+      da FACE_LAYOUT, misurata sulla cella vecchia e non piu' valida dopo la
+      ricalibrazione del 3 settembre;
+    * NESSUN loop e nessun recupero: un passaggio. Se un moto fallisce
+      l'albero si ferma li', che e' cio' che si vuole guardando il robot per
+      la prima volta.
+
+  Due blocchi commentati permettono di salire di livello un passo alla volta:
+    BLOCCO PRESA  -> aggiunge chiusura del gripper e attach
+    BLOCCO FLIP   -> aggiunge la rotazione di 90 gradi
+  Il flip richiede ANCHE di cambiare la discesa da -0.095 a -0.06: senza
+  flip l'utensile e' verticale e si scende quanto si e' saliti, dopo un flip
+  la pinza e' ORIZZONTALE e il corpo dell'Hand-E limita la discesa
+  (misurato: 8 cm falliscono, 6 passano).
+
+  Velocita' 0.6 e 0.3, contro 1.0 e 0.3 della missione: questo albero resta
+  deliberatamente piu' lento, e' quello con cui si guarda il robot per la prima
+  volta. I numeri sono stati RADDOPPIATI il 2026-09-04 non per andare piu'
+  forte ma per compensare il motion server, la cui max_velocity e' scesa da
+  0.5 a 0.25 con l'aggiornamento dell'immagine: velocity_scaling ci si
+  MOLTIPLICA, quindi 0.3 dava 0.075 effettivo e un singolo moto si prendeva 18
+  secondi. 0.6 x 0.25 = 0.15, cioe' esattamente la velocita' effettiva che
+  l'albero aveva prima. L'intenzione non e' cambiata, e' cambiato il fattore.
+
+       Costanti del gripper: sono quelle degli organizzatori, prese dalla loro
+       implementazione di riferimento drims_homework/demo_node.py
+
+           gripper_command(position=0.045)   # Open gripper
+           gripper_command(position=0.0)     # 0.0 = closed
+           # 0.045 = open, adjust depending on gripper model
+
+       Il loro commento "adjust depending on gripper model" e' la cosa da
+       ricordare: il numero dipende dal modello di pinza, non e' universale.
+
+       max_effort resta al DEFAULT di MotionClient.gripper_command, cioe' 0.0,
+       che la sua docstring definisce "no explicit limit". example.xml usa
+       1.0, ma demo_node.py - l'implementazione di riferimento - lascia il
+       default, e quello e' il dato piu' vicino a un consiglio.
+       Sul robot vero 0.0 non significa comunque "senza limite": l'adapter
+       URCap lo SATURA al minimo dichiarato di 20 N (il controllo che
+       solleverebbe un'eccezione e' commentato nel loro codice), e 20 N su un
+       dado e' esattamente quello che si vuole.
+
+       position e' l'APERTURA, e lo stesso valore serve entrambi i bersagli.
+       Sul robot vero l'adapter URCap la interpreta in metri sul fondo scala
+       0..0.05 dell'Hand-E, quindi 0.045 e' quasi tutta aperta. In simulazione
+       comanda il giunto robotiq_hande_left_finger_joint, che la cella
+       istanzia con grip_pos_min=0 e grip_pos_max=0.025 (ur5e_cell.urdf.xacro):
+       0.045 e' oltre il fondo corsa e vale quindi "tutta aperta" per
+       saturazione. Funziona su entrambi, ma per ragioni diverse - vedi la nota
+       in fondo a questo file.
+
+       effort_low ed effort_grasp valgono lo stesso numero e restano due chiavi
+       distinte di proposito: aprire non richiede forza, stringere si', e sul
+       robot vero l'effort mappa sulla forza di presa. Se un giorno serve
+       differenziarli, il posto c'e' gia'.
+  ===========================================================================
+  -->
+
+  <BehaviorTree ID="PickPlace">
+    <Sequence>
+
+      <Script code="world_frame:='table_top';
+                    object_id:='dice';
+                    grip_open:=0.045;
+                    grip_close:=0.0;
+                    effort_low:=0.0;
+                    effort_grasp:=0.0;
+                    vel_fast:=0.6;
+                    vel_slow:=0.3" />
+
+      <!-- 1. Stato iniziale noto: la STESSA posa in cui parte la simulazione,
+           cioe' initial_positions.yaml di drims_description.
+           Il pan a 1.57 non e' arbitrario: nella cella 1 il robot e' montato
+           con rpy "0 0 -1.57", quindi gli stessi valori di giunto danno una
+           posa ruotata di -90 gradi rispetto al tavolo. Quel +1.57 annulla
+           la rotazione della base. Con la vecchia home (pan 0.0) sul robot
+           vero il braccio risultava ruotato di -90 gradi. -->
+      <MoveToJoint action_name="/move_to_joint"
+                   joint_target="1.57;-2.0;1.57;-1.57;-1.57;0.0"
+                   velocity_scaling="{vel_fast}"
+                   result_code="{rc_home}"/>
+
+      <!-- 2. Apri, e resta aperto per tutto il ciclo. Non e' cosmetico: con
+           45 mm di apertura (position 0.045) e un dado da 30 mm le dita lo
+           scavalcano con ~7.5 mm di gioco per lato, quindi la posa di presa e' libera da
+           collisioni. Col gripper chiuso MoveIt rifiuterebbe il goal. -->
+
+      <!-- ForceSuccess sull'APERTURA, non solo sulla chiusura.
+           Misurato sul robot vero il 2026-09-04: robotiq_2f_adapter_node.py:381
+           costruisce il Result con effort=0 (intero) invece di 0.0, e
+           control_msgs lo rifiuta con
+             AssertionError: The 'effort' field must be of type 'float'
+           Quel ramo si prende quando la pinza e' GIA' nella posizione
+           richiesta, quindi ogni apertura ridondante fa abortire l'action.
+           Nel log della missione questo bruciava i tentativi: due
+           GripperCommand per iterazione, nessun MoveToPose, sette tentativi
+           in 0.84 secondi, perche' Pick moriva sul suo primo nodo.
+           Il bug e' in static e non lo tocchiamo; qui si smette solo di
+           credere a un segnale che mente in entrambi i versi - in simulazione
+           abortisce quando la presa RIESCE, sul robot quando non c'e' niente
+           da fare. -->
+      <ForceSuccess>
+        <GripperCommand action_name="/gripper_action_controller/gripper_cmd"
+                        position="{grip_open}"
+                        max_effort="{effort_low}"/>
+      </ForceSuccess>
+
+      <!-- 3. Dove e' il dado. Serve anche a far comparire dice_tf: in
+           simulazione quella TF non esiste finche' il servizio non e' stato
+           chiamato almeno una volta. La foglia fallisce da sola se il
+           servizio risponde success=false. -->
+      <DiceIdentification service_name="/dice_identification"
+                          face_number="{face}"
+                          pose="{dice_pose}"/>
+
+      <CanTransform source_frame="{world_frame}"
+                    target_frame="dice_tf"
+                    timeout_ms="2000"/>
+
+      <!-- 4. Pregrasp: 10 cm sopra il centro della faccia superiore.
+           L'orientamento (1;0;0;0) rispetto a dice_tf e' 180 gradi attorno a
+           X: manda la X del tool sulla X di dice_tf, che sta nel piano della
+           faccia, quindi le dita si allineano a due facce laterali opposte. -->
+      <MoveToPose action_name="/move_to_pose"
+                  frame_id="dice_tf"
+                  position="0.0;0.0;0.10"
+                  orientation="1.0;0.0;0.0;0.0"
+                  relative_motion="false"
+                  cartesian_motion="false"
+                  velocity_scaling="{vel_fast}"
+                  result_code="{rc_pregrasp}"/>
+
+      <!-- 5. Discesa cartesiana fino al centro del dado, senza toccarlo.
+           -0.0135 = meta' di un dado da 27 mm. Se quello vero e' 30 mm
+           diventa -0.015. Il tip cade in pratica sul piano delle punte
+           (misurato: tip -> dita = [+-0.025, 0, -0.040]). -->
+      <!-- <MoveToPose action_name="/move_to_pose"
+                  frame_id="dice_tf"
+                  position="0.0;0.0;-0.0135"
+                  orientation="1.0;0.0;0.0;0.0"
+                  relative_motion="false"
+                  cartesian_motion="true"
+                  velocity_scaling="{vel_slow}"
+                  result_code="{rc_grasp}"/> -->
+
+      <!-- ==================== BLOCCO PRESA ====================
+           Da decommentare quando i moti sono validati e si vuole afferrare
+           per davvero. Il ForceSuccess sulla chiusura e' OBBLIGATORIO: con
+           allow_stalling:false il controller fa setAborted() sullo stallo, e
+           la foglia ritorna FAILURE proprio quando la presa e' RIUSCITA.
+           Il ForceSuccess sull'attach serve perche' sul robot vero il
+           servizio fallisce: attacca un oggetto ESISTENTE, e nessuno
+           aggiunge il CollisionObject 'dice' alla planning scene.
+
+      <ForceSuccess>
+        <GripperCommand action_name="/gripper_action_controller/gripper_cmd"
+                        position="{grip_close}"
+                        max_effort="{effort_grasp}"/>
+      </ForceSuccess>
+
+      <ForceSuccess>
+        <AttachObject service_name="/attach_object"
+                      object_id="{object_id}"
+                      target_frame_id="tip"/>
+      </ForceSuccess>
+
+           ================== FINE BLOCCO PRESA ================== -->
+
+      <!-- 6. Sollevamento: relativo nel frame WORLD e non nel tip, cosi' +Z
+           e' su senza ambiguita' di segno e non dipende dall'orientamento
+           dell'utensile. -->
+      <!-- <MoveToPose action_name="/move_to_pose"
+                  frame_id="{world_frame}"
+                  position="0.0;0.0;0.10"
+                  orientation="0.0;0.0;0.0;1.0"
+                  relative_motion="true"
+                  cartesian_motion="true"
+                  velocity_scaling="{vel_slow}"
+                  result_code="{rc_lift}"/> -->
+
+      <!-- ===================== BLOCCO FLIP =====================
+           Decommentare SOLO insieme al cambio della discesa a -0.06.
+           Rotazione di +90 gradi attorno alla X propria dell'utensile, che
+           coincide con l'asse fra le dita (verificato: tip -> dita sta sulla
+           X del tip). Cartesiano per garantire la continuita' del ramo IK:
+           senza, il solver ha restituito soluzioni valide ma lontane, fino a
+           418 gradi percorsi su wrist_1 in 19 secondi.
+           Quaternioni: +90  ->  0.7071068;0;0;0.7071068
+                        -90  -> -0.7071068;0;0;0.7071068
+                        180  ->  1.0;0.0;0.0;0.0
+
+      <MoveToPose action_name="/move_to_pose"
+                  frame_id="tip"
+                  position="0.0;0.0;0.0"
+                  orientation="0.7071068;0.0;0.0;0.7071068"
+                  relative_motion="true"
+                  cartesian_motion="true"
+                  velocity_scaling="{vel_slow}"
+                  result_code="{rc_flip}"/>
+
+           ==================== FINE BLOCCO FLIP ==================== -->
+
+      <!-- 7. Discesa. -0.095 contro i 0.10 della salita: si torna dove si
+           era con 5 mm di margine dal piano.
+           CON IL BLOCCO FLIP ATTIVO questo valore va portato a -0.06,
+           altrimenti la pinza orizzontale va contro il tavolo. -->
+      <!-- <MoveToPose action_name="/move_to_pose"
+                  frame_id="{world_frame}"
+                  position="0.0;0.0;-0.095"
+                  orientation="0.0;0.0;0.0;1.0"
+                  relative_motion="true"
+                  cartesian_motion="true"
+                  velocity_scaling="{vel_slow}"
+                  result_code="{rc_descend}"/> -->
+
+      <!-- 8. Il gripper e' gia' aperto: se il BLOCCO PRESA e' attivo, questo
+           e' il rilascio; altrimenti e' un no-op innocuo. -->
+      <!-- <GripperCommand action_name="/gripper_action_controller/gripper_cmd"
+                      position="{grip_open}"
+                      max_effort="{effort_low}"/>
+
+      <ForceSuccess>
+        <DetachObject service_name="/detach_object"
+                      object_id="{object_id}"/>
+      </ForceSuccess> -->
+
+      <!-- 9. Ritratta e torna a casa. Cartesiano come nel resto: il moto
+           relativo nel frame WORLD ha +Z "su" senza ambiguita' di segno.
+
+           LIMITE NOTO, misurato il 2026-09-04 e NON corretto qui di proposito.
+           Con il dado alla posizione di default nuova del pacchetto
+           (base_link -0.1, 0.65) questo moto ABORTISCE in 60 ms, cioe' senza
+           nemmeno provare a pianificare.
+
+           Non e' irraggiungibilita': col modello vero (a2=0.425, a3=0.3922,
+           spalla a z=0.1625) il polso a fine ritratta sta a 0.698 m dalla
+           spalla contro un massimo di 0.817, quindi 12 cm di margine. E' la
+           CONDIZIONE del percorso: con cartesian_max_step 0.01 e
+           cartesian_fraction_threshold 0.99 quei 15 cm vengono campionati in
+           15 punti che devono essere tutti risolvibili E continui, e su una
+           retta verticale a orientamento fisso il polso puo' passare per una
+           configurazione degenere. E' lo stesso guasto che il planner della
+           missione filtra campionando il percorso e scartando la variante;
+           qui non c'e' planner, quindi non c'e' filtro.
+
+           Perche' non l'ho "aggiustato" mettendo cartesian_motion=false: alla
+           posizione con cui questo albero e' stato validato il moto passa, e
+           il rimedio giusto sta nella CONFIGURAZIONE, non nell'albero - vedi
+           config/dice_spawner_cell1.yaml, che riporta il dado a 0.550 m
+           dall'asse invece di 0.657. Se ti serve robustezza ai bordi lontani
+           del tabellone usa la missione, che ha il planner: quello lo prova
+           prima di muoversi. -->
+      <MoveToPose action_name="/move_to_pose"
+                  frame_id="{world_frame}"
+                  position="0.0;0.0;0.15"
+                  orientation="0.0;0.0;0.0;1.0"
+                  relative_motion="true"
+                  cartesian_motion="true"
+                  velocity_scaling="{vel_fast}"
+                  result_code="{rc_retreat}"/>
+
+      <MoveToJoint action_name="/move_to_joint"
+                   joint_target="1.57;-2.0;1.57;-1.57;-1.57;0.0"
+                   velocity_scaling="{vel_fast}"
+                   result_code="{rc_home_end}"/>
+
+    </Sequence>
+  </BehaviorTree>
+
+</root>

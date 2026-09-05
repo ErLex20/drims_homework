@@ -1,0 +1,102 @@
+dice_planner_node:
+  ros__parameters:
+    base_frame: table_top
+    dice_frame: dice_tf
+    ee_frame: tip
+    move_group: manipulator
+    joint_names:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+
+    # Misurato sui dadi della scuola (2026-09-03), non i 27 mm nominali del
+    # modello del simulatore. Entra nella presa e nella quota di rilascio,
+    # quindi un errore qui e' un errore in profondita' sul dado.
+    dice_size: 0.030
+
+    # Quanto sotto il CENTRO del dado va portato il TCP alla presa.
+    #
+    # 0.0, cioe' il TCP sul centro del dado. NON e' la stessa cosa del vecchio
+    # 0.0135: quel valore veniva sottratto a dice_tf, che sta sulla FACCIA
+    # SUPERIORE e non sul centro (vedi la conversione in _chain), quindi il TCP
+    # finiva comunque 1.5 mm sopra il centro. La geometria eseguita e' dunque
+    # la STESSA validata sulle 36 combinazioni; cambia che adesso il modello
+    # dice il vero, e di conseguenza place_clearance vale davvero quello che
+    # dichiara invece di 15 mm in piu'.
+    grasp_depth: 0.0
+
+    pregrasp_height: 0.10
+    # Quote di sollevamento da provare prima di ruotare, in ordine di
+    # preferenza. Non cambiano l'esito sul dado: sono l'unico grado di
+    # liberta' rimasto una volta che l'obiettivo ha fissato l'asse delle dita
+    # e l'avvicinamento verticale, e servono a trovare una configurazione di
+    # braccio ben condizionata per il flip. Misurato sul banco: senza di esse
+    # il filtro di singolarita' scartava 8 prese risolutive su 24 corse, una
+    # per corsa, e ognuna costa un ciclo intero.
+    lift_height: 0.10
+
+    # Altezza della faccia INFERIORE del dado sopra il piano al rilascio.
+    # Non e' libera: dopo il flip la pinza e' orizzontale e il corpo
+    # dell'Hand-E limita la discesa. Misurato il 2026-09-02: una discesa di
+    # 8 cm falliva (frazione cartesiana 8/9), 6 cm passava.
+    # E' il numero piu' importante da tarare al banco, ed e' l'argomento piu'
+    # forte per delle fingertip a V.
+    place_clearance: 0.030
+
+    # ---- gestione delle singolarita' -------------------------------------
+    joint_limit: 6.283185307
+
+    # Rilevatore di singolarita', in rad di giunto per METRO di percorso
+    # cartesiano - NON per campione. 24 rad/m e' la vecchia soglia di 0.6 rad
+    # riportata al metro (0.6 / 0.025), cioe' lo STESSO criterio con cui il
+    # banco delle 36 combinazioni e' stato validato, ma ora indipendente dalla
+    # densita' di campionamento.
+    joint_rate_limit: 24.0
+
+    # Il pregrasp e' un moto libero in spazio giunti da una posa lontana: li'
+    # un riallineamento di polso di mezzo giro e' legittimo e non dice nulla
+    # sul condizionamento della catena.
+    max_step_free: 3.3
+
+    # Sotto questa soglia wrist_2 allinea gli assi 4 e 6 e il polso perde un
+    # grado di liberta'.
+    wrist_singularity_margin: 0.10
+
+    # Passo con cui il planner campiona i tratti cartesiani. NON e' una
+    # scelta libera: deve corrispondere a cartesian_max_step del motion server
+    # (drims_description/config/ur5e/motion_server_config.yaml), perche' e' il
+    # passo con cui computeCartesianPath campionera' davvero il percorso.
+    #
+    # Prima erano tre costanti a occhio (4, 7, 4 campioni). Misurato il
+    # 2026-09-04: sulla discesa il planner ne metteva 4 dove MoveIt ne chiede
+    # ~10, cioe' verificava un punto ogni 2.5. Un percorso puo' quindi
+    # risultare sano al planner e venire rifiutato da MoveIt in 60 ms.
+    cartesian_max_step: 0.01
+
+    # Deve corrispondere a cartesian_fraction_threshold del motion server.
+    # Sotto questa frazione il moto viene rifiutato, quindi il planner usa lo
+    # stesso numero per scartare in anticipo le varianti impraticabili.
+    cartesian_fraction_threshold: 0.99
+
+    ik_timeout: 0.05
+    # false di proposito: qui si valuta la CINEMATICA, non le collisioni.
+    ik_avoid_collisions: false
+
+    publish_rate: 20.0
+    # Frequenza di ri-interrogazione di /dice_identification. Bassa di
+    # proposito: il servizio del rilevatore vota su una finestra di frame.
+    poll_rate: 4.0
+    # Il piano si calcola in background e il servizio lo congela: cosi'
+    # /plan_available risponde subito anche se la valutazione IK di tutte le
+    # varianti richiede qualche decimo di secondo.
+    plan_rate: 2.0
+    # Oltre questo tempo dalla presa in carico di un piano, se la faccia non
+    # e' cambiata il ciclo e' fallito e si ripianifica. Un ciclo sano dura
+    # ~20 s in simulazione.
+    busy_timeout: 45.0
+
+    # 0 = attende /target_face. Il topic ha sempre la precedenza.
+    initial_target_face: 3

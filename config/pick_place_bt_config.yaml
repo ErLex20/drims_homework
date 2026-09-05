@@ -1,0 +1,23 @@
+bt_executer_node:
+  ros__parameters:
+    bt_xml_file: pick_place.xml
+    bt_package: drims_homework
+
+    # NIENTE chiave "plugins" qui: una lista vuota in YAML non ha tipo e
+    # rclcpp non riesce a dedurlo, quindi il parametro risulta NON IMPOSTATO e
+    # il nodo muore con
+    #   parameter_value_from failed for parameter 'plugins': No parameter value set
+    # Omettendola vale il default dichiarato nel C++ (vettore vuoto, tipizzato),
+    # che e' esattamente cio' che serve: pick_place.xml non usa nessun plugin
+    # sincrono (niente check_dice_face, niente can_transform sincrono).
+
+    # solo cio' che pick_place.xml usa davvero. attach_object e detach_object
+    # restano perche' servono appena si decommenta il BLOCCO PRESA.
+    ros_plugins:
+      - can_transform
+      - move_to_pose
+      - move_to_joint
+      - gripper_command
+      - attach_object
+      - detach_object
+      - dice_identification

@@ -27,6 +27,8 @@ setup(
     entry_points={
         'console_scripts': [
             'demo_node = drims_homework.demo_node:main',
+            'dice_planner = drims_homework.dice_planner:main',
+            'dice_identification_server = drims_homework.dice_identification_server_node:main',
         ],
     },
 )
